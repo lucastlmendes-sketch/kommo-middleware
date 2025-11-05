@@ -3,14 +3,15 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import requests, os, datetime
 
-app = FastAPI(title="Kommo ↔ ChatGPT Middleware (Secure Edition)")
+app = FastAPI(title="Kommo ↔ ChatGPT Middleware (Auto Secure Edition)")
 
 # Variáveis de ambiente
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 KOMMO_TOKEN = os.getenv("KOMMO_TOKEN")
-KOMMO_DOMAIN = os.getenv("KOMMO_DOMAIN")
+KOMMO_DOMAIN = os.getenv("KOMMO_DOMAIN")  # Ex: https://tecnobrilho.kommo.com
+AUTHORIZED_SUBDOMAIN = KOMMO_DOMAIN.replace("https://", "").replace(".kommo.com", "") if KOMMO_DOMAIN else None
 
-# CORS restrito — permite apenas o domínio do Kommo
+# CORS restrito — apenas o domínio do Kommo pode acessar
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[KOMMO_DOMAIN] if KOMMO_DOMAIN else ["*"],
@@ -21,7 +22,7 @@ app.add_middleware(
 
 @app.get("/")
 def home():
-    return {"status": "ok", "message": "Middleware ativo e seguro", "kommo_domain": KOMMO_DOMAIN}
+    return {"status": "ok", "message": "Middleware ativo com validação automática de domínio", "kommo_domain": KOMMO_DOMAIN}
 
 @app.get("/health")
 def health():
@@ -34,18 +35,17 @@ def ping():
 
 @app.post("/kommo-webhook")
 async def kommo_webhook(request: Request):
-    # Verifica o token de autorização
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or auth_header != f"Bearer {KOMMO_TOKEN}":
-        raise HTTPException(status_code=401, detail="Acesso não autorizado: token inválido")
-
     try:
         payload = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Payload inválido ou ausente")
 
-    # Log simples de auditoria
-    print(f"[{datetime.datetime.now()}] Payload recebido: {payload}")
+    # Validação automática do subdomínio do Kommo
+    subdomain = payload.get("account", {}).get("subdomain")
+    if not subdomain or subdomain != AUTHORIZED_SUBDOMAIN:
+        raise HTTPException(status_code=401, detail=f"Subdomínio não autorizado: {subdomain}")
+
+    print(f"[{datetime.datetime.now()}] Webhook recebido do subdomínio autorizado: {subdomain}")
 
     message = (
         payload.get("message", {}).get("text")
