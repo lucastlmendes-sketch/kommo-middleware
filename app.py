@@ -1,174 +1,189 @@
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import os
 import datetime
 import requests
-from fastapi import FastAPI, HTTPException, Request
 
-from openai import OpenAI
+app = FastAPI(title="Kommo ↔ TecBrilho Middleware (Erika)")
 
-# Inicializa FastAPI
-app = FastAPI()
+# ---- CORS (opcional, mas ajuda em testes) ----
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Cliente OpenAI
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# ---- Variáveis de ambiente ----
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
 
-# Configurações do Kommo
-KOMMO_DOMAIN = os.getenv("KOMMO_DOMAIN", "").rstrip("/")
-KOMMO_TOKEN = os.getenv("KOMMO_TOKEN", "")
+KOMMO_DOMAIN = (os.getenv("KOMMO_DOMAIN") or "").rstrip("/")  # ex.: https://tecbrilho.kommo.com
+KOMMO_TOKEN = os.getenv("KOMMO_TOKEN", "").strip()
 
-# ID do assistente da Erika (criado na plataforma OpenAI)
-ERIKA_ASSISTANT_ID = os.getenv("ERIKA_ASSISTANT_ID") or os.getenv("ZIDANE_ASSISTANT_ID")
+# Subdomínio permitido (opcional – segurança extra)
+AUTHORIZED_SUBDOMAIN = None
+if KOMMO_DOMAIN:
+    # https://tecbrilho.kommo.com -> "tecbrilho"
+    host = KOMMO_DOMAIN.split("//")[-1]
+    AUTHORIZED_SUBDOMAIN = host.split(".")[0]
 
-if not ERIKA_ASSISTANT_ID:
-    print("[ERRO] ERIKA_ASSISTANT_ID não configurado no ambiente.")
+# Prompt principal da Erika.
+# Se quiser, você pode mover esse texto para uma env var ERIKA_PROMPT
+# e manter aqui apenas: ERIKA_PROMPT = os.getenv("ERIKA_PROMPT", "...")
+ERIKA_PROMPT = """
+Você é Erika, Agente Oficial da TecBrilho, especialista em estética automotiva,
+vendedora consultiva, organizadora de agenda e relacionamento com clientes.
+Fale sempre em português do Brasil, com mensagens curtas (1–2 frases),
+em múltiplos turnos, usando o estilo e as regras definidas no script interno
+da operação TecBrilho (vendas consultivas, foco na dor do cliente,
+uso do catálogo TecBrilho como fonte oficial, regras comerciais e fluxo de funil
+no Kommo). Nunca invente serviços, nomes ou valores.
+Sempre peça nome e modelo do carro no início do atendimento e conduza o cliente
+até o agendamento ou próximo passo adequado (reengajamento, pós-venda, etc.).
+"""
 
-# -------------------------------------------------------------------
-# Healthcheck
-# -------------------------------------------------------------------
-@app.get("/health")
-def health():
+if not OPENAI_API_KEY:
+    # Sem chave não tem como subir o serviço corretamente
+    raise RuntimeError("OPENAI_API_KEY não configurada no ambiente.")
+
+
+# --------------------------------------------------------------------
+# Chamada à OpenAI (Erika)
+# --------------------------------------------------------------------
+def call_openai_erika(user_message: str) -> str:
+    """
+    Envia a mensagem do cliente para a OpenAI usando o modelo configurado
+    e o prompt da Erika. Usa a API /v1/responses.
+    """
+    url = "https://api.openai.com/v1/responses"
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": OPENAI_MODEL,
+        "input": [
+            {"role": "system", "content": ERIKA_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
+    }
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+
+    # Formato atual da Responses API:
+    # data["output"][0]["content"][0]["text"]["value"]
+    try:
+        text = (
+            data["output"][0]["content"][0]["text"]["value"]
+            .strip()
+        )
+    except Exception:
+        # Se a estrutura mudar, devolvemos algo útil para depuração
+        text = f"[ERRO AO LER RESPOSTA DA OPENAI] raw={data}"
+    return text
+
+
+# --------------------------------------------------------------------
+# Endpoints básicos
+# --------------------------------------------------------------------
+@app.get("/")
+async def root():
     return {
         "status": "ok",
         "service": "kommo-middleware",
-        "time": datetime.datetime.utcnow().isoformat(),
+        "time_utc": datetime.datetime.utcnow().isoformat(),
     }
 
-# -------------------------------------------------------------------
-# Função para chamar a Erika via OpenAI Assistants (Responses API)
-# -------------------------------------------------------------------
-def call_openai_erika(message: str) -> str:
-    """
-    Envia a mensagem do cliente para o assistente Erika na OpenAI
-    e retorna apenas o texto da resposta.
-    """
-    if not ERIKA_ASSISTANT_ID:
-        raise RuntimeError("ERIKA_ASSISTANT_ID não configurado.")
 
-    try:
-        response = client.responses.create(
-            model="gpt-4.1-mini",
-            assistant_id=ERIKA_ASSISTANT_ID,
-            input=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": message,
-                        }
-                    ],
-                }
-            ],
-        )
-
-        # Extrai o texto da primeira saída
-        output_text = ""
-        for item in response.output:
-            if item.type == "message":
-                for content_part in item.message.content:
-                    if content_part.type == "output_text":
-                        output_text += content_part.text.value
-
-        if not output_text:
-            output_text = (
-                "Desculpa, tive um problema momentâneo para gerar a resposta. "
-                "Pode repetir a sua pergunta?"
-            )
-
-        return output_text.strip()
-
-    except Exception as e:
-        print(f"[ERRO] Falha ao chamar OpenAI: {e}")
-        return (
-            "Tive um probleminha técnico aqui, mas já pode tentar novamente "
-            "ou falar com a equipe humana da TecBrilho. 🙏"
-        )
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 
-# -------------------------------------------------------------------
+# --------------------------------------------------------------------
 # Webhook do Kommo
-# -------------------------------------------------------------------
+# --------------------------------------------------------------------
 @app.post("/kommo-webhook")
 async def kommo_webhook(request: Request):
-    """
-    Endpoint chamado pelo Kommo ao receber/atualizar mensagens.
-    - Lê o payload
-    - Extrai mensagem de texto e lead_id
-    - Chama a Erika (OpenAI Assistants)
-    - Cria uma nota no Kommo com a resposta
-    """
+    payload = await request.json()
+    print(f"{datetime.datetime.now()} Webhook recebido: keys={list(payload.keys())}")
+
+    # 1) Validação opcional do subdomínio do Kommo
     try:
-        payload = await request.json()
+        account = payload.get("account") or payload.get("_embedded", {}).get("account") or {}
+        subdomain = account.get("subdomain")
     except Exception:
-        raise HTTPException(status_code=400, detail="Payload inválido ou ausente")
+        subdomain = None
 
-    print(f"[{datetime.datetime.utcnow().isoformat()}] Webhook recebido: {payload}")
-
-    # Validação opcional de subdomínio (caso queira travar por segurança)
-    account = payload.get("account", {}) or {}
-    subdomain = account.get("subdomain") or account.get("name")
-    authorized = os.getenv("AUTHORIZED_SUBDOMAIN")
-    if authorized and subdomain and subdomain != authorized:
+    if AUTHORIZED_SUBDOMAIN and subdomain and subdomain != AUTHORIZED_SUBDOMAIN:
         raise HTTPException(
             status_code=401,
             detail=f"Subdomínio não autorizado: {subdomain}",
         )
 
-    # Extrai mensagem
+    data = payload.get("data") or payload
+
+    # 2) Extrai texto da mensagem
     message = (
-        payload.get("message", {}).get("text")
-        or payload.get("text")
-        or payload.get("last_message", {}).get("text")
+        (data.get("message") or {}).get("text")
+        or data.get("text")
+        or (data.get("last_message") or {}).get("text")
         or ""
     )
 
-    # Extrai lead
-    lead = payload.get("lead") or {}
-    lead_id = lead.get("id") or payload.get("lead_id")
+    # 3) Extrai lead_id (formato mais comum dos webhooks do Kommo)
+    lead = data.get("lead") or {}
+    lead_id = lead.get("id") or data.get("lead_id")
 
-    if not message:
-        # Nada para responder
+    if not message or not str(message).strip():
+        # Nada pra responder
         return {
             "status": "ignored",
             "reason": "sem mensagem",
             "payload_keys": list(payload.keys()),
         }
 
-    # Chama Erika na OpenAI
-    ai_response = call_openai_erika(message)
+    # 4) Chama Erika (OpenAI)
+    try:
+        ai_response = call_openai_erika(str(message))
+    except Exception as e:
+        print("Erro ao chamar OpenAI:", e)
+        raise HTTPException(status_code=500, detail=f"Erro ao chamar OpenAI: {e}")
 
-    # Se houver lead_id, tenta criar uma nota no Kommo
-    note_result = "skipped"
+    # 5) Cria nota no Kommo (se tivermos lead_id + config do Kommo)
+    note_status = "skipped"
     if lead_id and KOMMO_DOMAIN and KOMMO_TOKEN:
-        try:
-            # Kommo espera um ARRAY de notas
-            note_data = [
-                {
-                    "entity_id": lead_id,
-                    "note_type": "common",
-                    "params": {
-                        "text": f"Erika: {ai_response}",
-                    },
-                }
-            ]
-
-            url = f"{KOMMO_DOMAIN}/api/v4/leads/notes"
-            headers = {
-                "Authorization": f"Bearer {KOMMO_TOKEN}",
-                "Content-Type": "application/json",
+        note_payload = [
+            {
+                "entity_id": lead_id,
+                "note_type": "common",
+                "params": {
+                    "text": f"🤖 Erika: {ai_response}"
+                },
             }
+        ]
 
-            r = requests.post(url, json=note_data, headers=headers, timeout=30)
-            print(f"[INFO] Kommo note response: {r.status_code} {r.text}")
+        try:
+            notes_url = f"{KOMMO_DOMAIN}/api/v4/leads/notes"
+            r = requests.post(
+                notes_url,
+                headers={"Authorization": f"Bearer {KOMMO_TOKEN}"},
+                json=note_payload,
+                timeout=30,
+            )
             r.raise_for_status()
-            note_result = "ok"
-
+            note_status = "ok"
         except Exception as e:
-            print(f"[ERRO] Falha ao criar nota no Kommo: {e}")
-            note_result = "failed"
+            print("Erro ao criar nota no Kommo:", e)
+            note_status = f"failed: {e}"
 
     return {
         "status": "ok",
         "lead_id": lead_id,
         "ai_response": ai_response,
-        "kommo_note": note_result,
+        "kommo_note": note_status,
     }
