@@ -241,26 +241,33 @@ def call_openai_erika(
 
 @app.post("/kommo-webhook")
 async def kommo_webhook(request: Request):
-    # Algumas chamadas do Kommo podem vir sem corpo ou com outro método.
-    # Aqui garantimos que só tentamos ler JSON se realmente houver algo.
+    # Lê o corpo cru da requisição
     raw_body = await request.body()
-    if not raw_body:
-        log("Webhook sem corpo (body vazio). Ignorando.")
+    log("Webhook - raw body (primeiros 200 bytes):", raw_body[:200])
+
+    # Se não veio nada no body, ignora educadamente
+    if not raw_body or raw_body.strip() in (b"",):
+        log("Webhook recebido sem corpo (body vazio). Ignorando.")
         return {
             "status": "ignored",
             "reason": "empty body",
-            "method": request.method,
         }
 
+    # Tenta decodificar como JSON
     try:
         payload = json.loads(raw_body.decode("utf-8"))
     except Exception as e:
-        log("Erro ao ler JSON do webhook:", repr(e), "body_bruto:", raw_body[:200])
-        raise HTTPException(status_code=400, detail="Payload inválido ou ausente")
+        log("Erro ao decodificar JSON do webhook:", repr(e), "body preview:", raw_body[:200])
+        # Aqui você pode escolher entre:
+        # - devolver 400 para ver no Kommo que o payload está errado
+        # - OU apenas ignorar para não quebrar nada
+        raise HTTPException(status_code=400, detail="Payload inválido ou não é JSON")
 
     log("Webhook recebido (primeiros 1000 chars):", json.dumps(payload)[:1000])
 
+    # ============================
     # Validação opcional de subdomínio
+    # ============================
     if AUTHORIZED_SUBDOMAIN:
         account = payload.get("account") or {}
         subdomain = None
@@ -272,9 +279,9 @@ async def kommo_webhook(request: Request):
 
     data = payload.get("data") or payload
 
-    # ==========================
+    # ============================
     # Extração da mensagem de texto
-    # ==========================
+    # ============================
     message_text = (
         (data.get("message") or {}).get("text")
         or (data.get("conversation") or {}).get("last_message", {}).get("text")
@@ -283,9 +290,9 @@ async def kommo_webhook(request: Request):
         or ""
     )
 
-    # ==========================
+    # ============================
     # Extração do lead_id
-    # ==========================
+    # ============================
     lead = data.get("lead") or {}
     lead_id = (
         lead.get("id")
@@ -293,9 +300,9 @@ async def kommo_webhook(request: Request):
         or (data.get("conversation") or {}).get("lead_id")
     )
 
-    # ==========================
-    # Extração de telefone (se vier no payload)
-    # ==========================
+    # ============================
+    # Extração do telefone
+    # ============================
     phone = None
     contact = data.get("contact") or {}
     if isinstance(contact, dict):
@@ -315,18 +322,16 @@ async def kommo_webhook(request: Request):
             "payload_keys": list(payload.keys()),
         }
 
-    # ==========================
+    # ============================
     # Chama a Erika via Assistants API
-    # ==========================
+    # ============================
     try:
         ai_full = call_openai_erika(message_text, lead_id=lead_id, phone=phone)
     except Exception as e:
         log("Erro ao chamar Erika:", repr(e))
         raise HTTPException(status_code=500, detail="Erro ao processar resposta da Erika")
 
-    # ==========================
-    # Separa texto para o cliente e bloco ERIKA_ACTION
-    # ==========================
+    # Separa texto visível e bloco ERIKA_ACTION
     visible_text, action = split_erika_output(ai_full)
 
     reply_text = (
@@ -335,12 +340,11 @@ async def kommo_webhook(request: Request):
         else "Oi! Sou a Erika, da TecBrilho. Como posso te ajudar hoje?"
     )
 
-    # ==========================
-    # Cria notas e tenta mover etapa, se possível
-    # ==========================
+    # ============================
+    # Cria notas e movimenta funil, se possível
+    # ============================
     if lead_id:
         try:
-            # Nota com a resposta visível da Erika
             add_kommo_note(lead_id, f"Erika 🧠:\n{reply_text}")
 
             if action and isinstance(action, dict):
@@ -352,7 +356,6 @@ async def kommo_webhook(request: Request):
                 if stage:
                     update_lead_stage(lead_id, stage)
         except Exception as e:
-            # Não quebra a resposta para o Kommo se der erro na nota/movimentação
             log("Erro ao registrar nota ou atualizar estágio no Kommo:", repr(e))
 
     return {
