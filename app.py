@@ -183,7 +183,19 @@ def parse_kommo_form_urlencoded(body: bytes) -> Dict[str, Any]:
 
     account = {"subdomain": first("account[subdomain]")}
 
-    # Monta o dicionário message com QUALQUER campo message[xyz]
+    # ---------------------------
+    # Texto da mensagem
+    # ---------------------------
+    # Tentamos pegar o campo "bonito" primeiro
+    msg_text = (
+        first("message[text]")
+        or first("message[body]")
+        or first("message[message]")
+        or first("message[add][0][text]")
+        or first("message[add][0][message]")
+    )
+
+    # Vamos montar o dicionário message com QUALQUER campo message[...]
     message: Dict[str, Any] = {}
     for key, vals in qs.items():
         if key.startswith("message[") and key.endswith("]"):
@@ -191,11 +203,33 @@ def parse_kommo_form_urlencoded(body: bytes) -> Dict[str, Any]:
             if vals:
                 message[inner] = vals[0]
 
-    # lead_id
-    lead_id = safe_int(first("lead[id]"))
+    # Se ainda não achamos o texto, vasculhamos as chaves
+    if not msg_text and message:
+        for k, v in message.items():
+            k_str = str(k)
+            if "text" in k_str or "message" in k_str or "body" in k_str:
+                msg_text = v
+                break
+
+    # Se achamos algum texto, garantimos um campo canonical "text"
+    if msg_text:
+        message["text"] = msg_text
+
+    # ---------------------------
+    # Lead id
+    # ---------------------------
+    lead_id = safe_int(
+        first("lead[id]")
+        or first("leads[0][id]")
+        or first("message[add][0][entity_id]")
+        or first("message[add][0][element_id]")
+    )
+
     lead = {"id": lead_id} if lead_id is not None else {}
 
-    # telefone
+    # ---------------------------
+    # Telefone
+    # ---------------------------
     phone = (
         first("contact[phones][0][value]")
         or first("contact[phones][0][phone]")
@@ -326,7 +360,7 @@ async def kommo_webhook(request: Request):
     # Extração da mensagem de texto (mais flexível)
     msg_block = data.get("message") or {}
     message_text = (
-        msg_block.get("text")        # formato comum em JSON
+        msg_block.get("text")        # formato comum em JSON ou setado pelo parser
         or msg_block.get("body")     # alguns webhooks usam "body"
         or msg_block.get("message")  # fallback genérico
         or (data.get("conversation") or {}).get("last_message", {}).get("text")
@@ -342,6 +376,17 @@ async def kommo_webhook(request: Request):
         or data.get("lead_id")
         or (data.get("conversation") or {}).get("lead_id")
     )
+
+    # Se ainda não achou lead_id, tenta extrair de message[add][0][entity_id]/element_id
+    if not lead_id and isinstance(msg_block, dict):
+        for k, v in msg_block.items():
+            k_str = str(k)
+            if "entity_id" in k_str or "element_id" in k_str:
+                try:
+                    lead_id = int(v)
+                    break
+                except (TypeError, ValueError):
+                    continue
 
     # Extração de telefone (se vier no payload)
     phone = None
