@@ -1,12 +1,12 @@
 import os
 import json
 import datetime
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 
 from urllib.parse import parse_qs
 
 import requests
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
 from openai import OpenAI
 
@@ -157,6 +157,97 @@ def update_lead_stage(lead_id: Optional[int], stage_name: Optional[str]):
     log(f"Atualizando lead {lead_id} para etapa '{stage_name}' (status_id={status_id})")
     r = requests.patch(url, headers=headers, json=payload, timeout=30)
     r.raise_for_status()
+
+
+# =========================================
+# Helpers extra para REATIVAÇÃO (Kommo)
+# =========================================
+
+def fetch_leads_for_reactivation(limit: int = 5) -> List[Dict[str, Any]]:
+    """
+    Busca no Kommo alguns leads candidatos a reativação.
+    Aqui usamos, por exemplo, a etapa "Reengajar".
+    Ajuste este filtro conforme sua estratégia.
+    """
+    if not KOMMO_DOMAIN or not KOMMO_TOKEN:
+        log("fetch_leads_for_reactivation: KOMMO_DOMAIN/KOMMO_TOKEN não configurados.")
+        return []
+
+    status_id_reengajar = os.getenv("KOMMO_STATUS_REENGAJAR")
+    if not status_id_reengajar:
+        log("fetch_leads_for_reactivation: KOMMO_STATUS_REENGAJAR não configurado.")
+        return []
+
+    url = f"{KOMMO_DOMAIN}/api/v4/leads"
+    headers = {"Authorization": f"Bearer {KOMMO_TOKEN}"}
+    params = {
+        "limit": limit,
+        "filter[statuses][0][status_id]": int(status_id_reengajar),
+    }
+
+    log("Buscando leads para reativação em", url, "params=", params)
+    r = requests.get(url, headers=headers, params=params, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+
+    embedded = data.get("_embedded", {})
+    leads = embedded.get("leads", [])
+    log(f"fetch_leads_for_reactivation: encontrados {len(leads)} leads candidatos.")
+    return leads
+
+
+def build_lead_context_text(lead: Dict[str, Any]) -> str:
+    """
+    Monta um texto de contexto simples para mandar à Erika no modo reativação.
+    Você pode enriquecer isso depois com histórico completo, notas, etc.
+    """
+    lead_id = lead.get("id")
+    name = lead.get("name") or "Cliente"
+    status_id = lead.get("status_id")
+    price = lead.get("price")
+    created_at = lead.get("created_at")
+    updated_at = lead.get("updated_at")
+
+    lines = [
+        f"Lead ID: {lead_id}",
+        f"Nome exibido do lead: {name}",
+        f"Status_id atual no Kommo: {status_id}",
+        f"Valor (se houver): {price}",
+        f"Criado em (timestamp): {created_at}",
+        f"Última atualização (timestamp): {updated_at}",
+    ]
+
+    context_text = "\n".join(lines)
+    return context_text
+
+
+def send_whatsapp_via_kommo(lead: Dict[str, Any], text: str):
+    """
+    ENVIO REAL DE MENSAGEM VIA KOMMO (WHATSAPP).
+
+    ATENÇÃO:
+      - Este é um placeholder em modo SEGURO.
+      - Neste momento, ele APENAS cria uma nota no lead com o texto
+        que seria enviado no WhatsApp.
+      - Quando você tiver o endpoint exato de envio via Kommo,
+        substitua este corpo pelo POST correto.
+
+    Ideia futura:
+      - Pegar o contact_id / chat_id vinculado ao lead
+      - Usar o endpoint oficial de mensagens/chats da API Kommo
+      - Mandar 'text' pro WhatsApp do cliente.
+    """
+    lead_id = lead.get("id")
+    if not lead_id:
+        log("send_whatsapp_via_kommo: lead sem id, não foi possível enviar.")
+        return
+
+    nota = f"[MENSAGEM PARA WHATSAPP]\n{text}"
+    try:
+        add_kommo_note(lead_id, nota)
+        log(f"send_whatsapp_via_kommo: nota criada com texto de WhatsApp para lead {lead_id}.")
+    except Exception as e:
+        log("send_whatsapp_via_kommo: erro ao criar nota simulando mensagem:", repr(e))
 
 
 # =========================================
@@ -450,3 +541,130 @@ async def kommo_webhook(request: Request):
             "erika_action": action,
         }
     )
+
+
+# =========================================
+# Endpoint CRON de REATIVAÇÃO
+# =========================================
+
+@app.post("/cron/reactivar")
+async def cron_reactivar(x_cron_key: Optional[str] = Header(None)):
+    """
+    Endpoint chamado por um CRON EXTERNO para reativar leads antigos.
+    Protegido por header:  X-CRON-KEY: <CRON_SECRET>
+    """
+    secret = os.getenv("CRON_SECRET") or ""
+    if not secret:
+        log("cron_reactivar: CRON_SECRET não configurado nas variáveis de ambiente.")
+        raise HTTPException(status_code=500, detail="CRON_SECRET não configurado")
+
+    if not x_cron_key or x_cron_key != secret:
+        log("cron_reactivar: chave de cron inválida ou ausente.")
+        raise HTTPException(status_code=401, detail="Não autorizado")
+
+    # 1) Buscar alguns leads candidatos
+    try:
+        leads = fetch_leads_for_reactivation(limit=5)
+    except Exception as e:
+        log("cron_reactivar: erro ao buscar leads:", repr(e))
+        raise HTTPException(status_code=500, detail="Erro ao buscar leads para reativação")
+
+    if not leads:
+        log("cron_reactivar: nenhum lead candidato encontrado.")
+        return {"status": "ok", "processed": 0, "details": []}
+
+    detalhes: List[Dict[str, Any]] = []
+
+    for lead in leads:
+        lead_id = lead.get("id")
+        if not lead_id:
+            continue
+
+        try:
+            context_text = build_lead_context_text(lead)
+
+            # Mensagem especial para o modo reativação
+            system_instructions = (
+                "Erika, agora você está em MODO REATIVAÇÃO DE LEADS.\n\n"
+                "Você receberá dados de um lead TecBrilho + um pequeno contexto.\n"
+                "Suas tarefas para ESTE lead específico são:\n"
+                "1) Decidir se vale a pena reativar agora.\n"
+                "2) Se sim, escrever uma mensagem humana e gentil que será enviada via WhatsApp,\n"
+                "   retomando a conversa de forma natural.\n"
+                "3) SEMPRE devolver no final um bloco ERIKA_ACTION neste formato:\n"
+                "### ERIKA_ACTION\n"
+                "{\n"
+                '  \"should_reactivate\": true ou false,\n'
+                '  \"kommo_suggested_stage\": \"Reengajar\" ou outra etapa válida,\n'
+                '  \"summary_note\": \"Resumo curto da sua decisão.\"\n'
+                "}\n"
+                "### END_ERIKA_ACTION\n"
+            )
+
+            user_message = (
+                f"{system_instructions}\n\n"
+                "A seguir estão os dados e contexto do lead:\n\n"
+                f"{context_text}\n\n"
+                "Com base nisso, aja conforme as instruções acima."
+            )
+
+            # Chama a Erika com esse contexto
+            raw_response = call_openai_erika(user_message, lead_id=lead_id)
+            visible_text, action = split_erika_output(raw_response)
+
+            visible_text = visible_text.strip() if visible_text else ""
+            if not visible_text:
+                visible_text = (
+                    "Oi, tudo bem? Aqui é a Erika, da TecBrilho. "
+                    "Passei pra saber se ainda faz sentido pra você cuidar daquele serviço no seu carro. 🙂"
+                )
+
+            should_reactivate = False
+            suggested_stage = None
+            summary_note = None
+
+            if action and isinstance(action, dict):
+                should_reactivate = bool(action.get("should_reactivate"))
+                suggested_stage = action.get("kommo_suggested_stage")
+                summary_note = action.get("summary_note")
+
+            # Nota com decisão da Erika
+            if summary_note:
+                try:
+                    add_kommo_note(lead_id, f"[ERIKA REATIVAÇÃO]\n{summary_note}")
+                except Exception as e:
+                    log("cron_reactivar: erro ao criar nota de summary_note:", repr(e))
+
+            # Se ela decidiu reativar, "enviar" mensagem + mover etapa se sugerido
+            if should_reactivate:
+                send_whatsapp_via_kommo(lead, visible_text)
+
+                if suggested_stage:
+                    try:
+                        update_lead_stage(lead_id, suggested_stage)
+                    except Exception as e:
+                        log("cron_reactivar: erro ao atualizar etapa do lead:", repr(e))
+
+            detalhes.append(
+                {
+                    "lead_id": lead_id,
+                    "should_reactivate": should_reactivate,
+                    "suggested_stage": suggested_stage,
+                    "summary_note": summary_note,
+                }
+            )
+
+        except Exception as e:
+            log(f"cron_reactivar: erro ao processar lead {lead_id}:", repr(e))
+            detalhes.append(
+                {
+                    "lead_id": lead_id,
+                    "error": str(e),
+                }
+            )
+
+    return {
+        "status": "ok",
+        "processed": len(detalhes),
+        "details": detalhes,
+    }
