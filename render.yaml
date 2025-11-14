@@ -1,4 +1,3 @@
-
 services:
   - type: web
     name: kommo-middleware
@@ -6,10 +5,16 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app:app --host 0.0.0.0 --port 10000
+    
     envVars:
       - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_ASSISTANT_ID
         sync: false
       - key: KOMMO_TOKEN
         sync: false
       - key: KOMMO_DOMAIN
+        sync: false
+      # Variável opcional para restringir o uso por subdomínio
+      - key: AUTHORIZED_SUBDOMAIN
         sync: false
