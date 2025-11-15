@@ -38,5 +38,21 @@ Crie **todas** estas variáveis no painel da Render:
 3. Vá ao **Salesbot**.
 4. Adicione um bloco **Widget**.
 5. Selecione o widget criado.
-6. No campo de texto do widget, insira a URL do webhook:
+6. No campo de texto do widget, insira a URL do webhook: https://kommo-middleware.onrender.com
+7. Publique o bot.
+
+---
+
+# 🔄 Fluxo Completo
+
+1. Cliente envia mensagem → Salesbot recebe → bloco Widget dispara.
+2. O widget envia:
+
+```json
+{
+"token": "JWT",
+"data": { "message": "texto" },
+"return_url": "https://.../continue/..."
+}
+
 
