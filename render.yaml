@@ -1,20 +1,42 @@
-services:
-  - type: web
-    name: kommo-middleware
-    env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port 10000
-    
-    envVars:
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: OPENAI_ASSISTANT_ID
-        sync: false
-      - key: KOMMO_TOKEN
-        sync: false
-      - key: KOMMO_DOMAIN
-        sync: false
-      # Variável opcional para restringir o uso por subdomínio
-      - key: AUTHORIZED_SUBDOMAIN
-        sync: false
+
+---
+
+# 🔧 Variáveis de Ambiente (Render)
+
+Crie **todas** estas variáveis no painel da Render:
+
+| Variável | Obrigatória | Descrição |
+|---------|-------------|-----------|
+| **OPENAI_API_KEY** | ✔️ | Chave da OpenAI |
+| **OPENAI_ASSISTANT_ID** | ✔️ | ID do assistant (formato `asst_xxxxx`) |
+| **KOMMO_TOKEN** | ✔️ | Token de API do Kommo |
+| **KOMMO_DOMAIN** | ✔️ | Domínio da sua conta (ex: `minhaempresa.kommo.com`) |
+
+---
+
+# 🛠 Deploy no Render
+
+1. Suba estes arquivos no GitHub.
+2. No Render, crie um novo serviço Web:
+   - Build Command:  
+     ```
+     pip install -r requirements.txt
+     ```
+   - Start Command:
+     ```
+     uvicorn app:app --host 0.0.0.0 --port 10000
+     ```
+3. Configure as variáveis de ambiente listadas acima.
+4. Deploy.
+
+---
+
+# 🔗 Integrando no Kommo
+
+1. Vá em **Configurações → Integrações → Minhas integrações**.
+2. Envie o arquivo `.zip` do widget.
+3. Vá ao **Salesbot**.
+4. Adicione um bloco **Widget**.
+5. Selecione o widget criado.
+6. No campo de texto do widget, insira a URL do webhook:
+
